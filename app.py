@@ -71,6 +71,19 @@ def init_db():
         );
         """
     )
+    # NEW: participation table per student per date
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS participation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            date_week TEXT NOT NULL,
+            participation INTEGER DEFAULT 0,
+            UNIQUE(student_id, date_week) ON CONFLICT REPLACE
+        );
+        """
+    )
+
     cur.execute("PRAGMA table_info(answers)")
     existing_cols = [row[1] for row in cur.fetchall()]
     if "group_name" not in existing_cols:
@@ -239,6 +252,37 @@ def save_class_scores(date_week: str, score_rows) -> None:
         cur.execute(
             "INSERT INTO class_scores (student_id, date_week, score, note) VALUES (?,?,?,?)",
             (student_id, date_week, score, note),
+        )
+    con.commit()
+    con.close()
+
+
+def load_participation_counts(date_week: str | None) -> dict[str, int]:
+    """Return participation count per student for a given date."""
+    if not date_week:
+        return {}
+    con = get_con()
+    df = pd.read_sql_query(
+        "SELECT student_id, participation FROM participation WHERE date_week=?",
+        con,
+        params=[date_week],
+    )
+    con.close()
+    if df.empty:
+        return {}
+    return dict(zip(df["student_id"], df["participation"]))
+
+
+def save_participation_counts(date_week: str, participation_rows) -> None:
+    """
+    participation_rows: iterable of (student_id, participation_count)
+    """
+    con = get_con()
+    cur = con.cursor()
+    for student_id, count in participation_rows:
+        cur.execute(
+            "INSERT INTO participation (student_id, date_week, participation) VALUES (?,?,?)",
+            (student_id, date_week, int(count)),
         )
     con.commit()
     con.close()
@@ -470,6 +514,7 @@ with tab_student:
                     st.session_state.show_preview = False
                     st.session_state.group_name = ""
                     st.session_state.pop("group_name_input", None)
+
 # ---------------- Teacher ----------------
 with tab_teacher:
     st.subheader("Manage Questions & Check Answers")
@@ -722,6 +767,114 @@ with tab_teacher:
                     )
                 else:
                     st.caption("Load answers above to enable CSV export.")
+
+        # ---------------- Participation page/section ----------------
+        st.divider()
+        with st.expander("👥 Student Participation (per date)", expanded=False):
+            # Teacher selects the date; default = same as manage_date
+            participation_date = st.text_input(
+                "Date / Week (for Participation)",
+                value=manage_date.strip(),
+                key="participation_date_input",
+                help="Use the same label that students selected when they pressed LOGIN.",
+            )
+
+            participation_date = participation_date.strip()
+            if not participation_date:
+                st.info("กรุณากรอกวันที่ / สัปดาห์ ก่อน")
+            else:
+                # 1) Get students who pressed LOGIN on this date
+                logged_students = list_logged_students(participation_date)
+                # 2) Get previously saved participation counts
+                existing_part = load_participation_counts(participation_date)
+
+                # Union of all student IDs who logged in OR already have participation saved
+                ids_from_login = (
+                    logged_students["student_id"].tolist()
+                    if not logged_students.empty
+                    else []
+                )
+                all_ids = sorted(set(ids_from_login) | set(existing_part.keys()))
+
+                if not all_ids:
+                    st.info("ยังไม่มีนักเรียนกด LOGIN สำหรับวันที่นี้")
+                else:
+                    # Keep participation state in session so + / - buttons feel instant
+                    state_key = f"participation_values_{participation_date}"
+                    if (state_key not in st.session_state) or (
+                        st.session_state.get("participation_date") != participation_date
+                    ):
+                        # Initialize from DB
+                        st.session_state["participation_date"] = participation_date
+                        st.session_state[state_key] = {
+                            sid: existing_part.get(sid, 0) for sid in all_ids
+                        }
+                    else:
+                        # Make sure new logins also appear with default 0
+                        for sid in all_ids:
+                            st.session_state[state_key].setdefault(
+                                sid, existing_part.get(sid, 0)
+                            )
+
+                    part_map = st.session_state[state_key]
+
+                    st.markdown("**รายการนักเรียนที่กด LOGIN และจำนวนครั้งที่มีส่วนร่วมในคาบ**")
+
+                    # Header row
+                    hcols = st.columns([3, 1, 1, 1])
+                    hcols[0].markdown("**Student ID**")
+                    hcols[1].markdown("**−**")
+                    hcols[2].markdown("**Participation**")
+                    hcols[3].markdown("**+**")
+
+                    # One row per student
+                    for sid in all_ids:
+                        cols = st.columns([3, 1, 1, 1])
+                        cols[0].write(sid)
+
+                        if cols[1].button(
+                            "➖",
+                            key=f"part_minus_{participation_date}_{sid}",
+                        ):
+                            part_map[sid] = max(0, part_map.get(sid, 0) - 1)
+                            st.session_state[state_key] = part_map
+                            st.rerun()
+
+                        cols[2].markdown(
+                            f"<div style='text-align:center;font-weight:bold;'>{part_map.get(sid, 0)}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                        if cols[3].button(
+                            "➕",
+                            key=f"part_plus_{participation_date}_{sid}",
+                        ):
+                            part_map[sid] = part_map.get(sid, 0) + 1
+                            st.session_state[state_key] = part_map
+                            st.rerun()
+
+                    # Show a summary table
+                    summary_rows_part = [
+                        {"Student ID": sid, "Participation": part_map.get(sid, 0)}
+                        for sid in all_ids
+                    ]
+                    summary_df_part = pd.DataFrame(summary_rows_part)
+                    st.markdown("**สรุปจำนวนครั้งที่มีส่วนร่วมตามนักเรียน**")
+                    st.dataframe(
+                        summary_df_part,
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                    # Save to DB
+                    if st.button(
+                        "💾 Save Participation",
+                        use_container_width=True,
+                        key="save_participation_btn",
+                    ):
+                        rows = [(sid, part_map.get(sid, 0)) for sid in all_ids]
+                        save_participation_counts(participation_date, rows)
+                        st.success("บันทึกจำนวนครั้งที่มีส่วนร่วมของนักเรียนเรียบร้อยแล้ว")
 
         st.caption(
             "Tip: Students can append extra questions before submitting. Default question set is provided by the teacher per Date/Week."
