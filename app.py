@@ -514,7 +514,6 @@ with tab_student:
                 disabled=(q_idx >= total - 1) or (not allow_next),
                 key=f"next_btn_{q_idx}",
             ):
-                # Move to next existing question; do NOT auto-add a new blank question
                 st.session_state.q_index = min(total - 1, q_idx + 1)
                 st.session_state.show_preview = False
                 st.rerun()
@@ -533,7 +532,6 @@ with tab_student:
             for a in st.session_state.answers[: len(st.session_state.current_questions)]
         )
 
-        # Preview & submit buttons
         if st.button("👁️ Preview", use_container_width=True, disabled=not all_filled):
             st.session_state.show_preview = True
         if not all_filled:
@@ -572,7 +570,6 @@ with tab_student:
                         st.session_state.get("group_name", ""),
                     )
                     st.success("Your answers have been submitted successfully!")
-                    # reset for new submission
                     st.session_state.started = False
                     st.session_state.q_index = 0
                     st.session_state.answers = [""] * len(DEFAULT_QUESTIONS)
@@ -695,7 +692,6 @@ with tab_teacher:
                     counts_df, how="left", on=["student_id", "date_week"]
                 )
 
-                # Load activity scores (from class_scores) and merge
                 class_scores_df = load_class_scores(None)
                 if not class_scores_df.empty:
                     class_scores_df = class_scores_df.rename(
@@ -719,63 +715,6 @@ with tab_teacher:
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 st.session_state["answers_export_df"] = display_df
                 st.session_state["answers_export_label"] = effective_filter or "all"
-
-        # Activity Score input (float) section
-        with st.expander("📝 Activity Score (per date)", expanded=False):
-            score_date = manage_date.strip()
-
-            # Gather students who have answers, logins, or existing scores on this date
-            answers_df_date = load_answers(score_date)
-            ans_ids = (
-                set(answers_df_date["student_id"].tolist())
-                if not answers_df_date.empty
-                else set()
-            )
-
-            logged_students = list_logged_students(score_date)
-            login_ids = (
-                set(logged_students["student_id"].tolist())
-                if not logged_students.empty
-                else set()
-            )
-
-            scores_df = load_class_scores(score_date)
-            score_ids = (
-                set(scores_df["student_id"].tolist()) if not scores_df.empty else set()
-            )
-
-            all_ids = sorted(ans_ids | login_ids | score_ids)
-
-            if not all_ids:
-                st.info("ยังไม่มีนักเรียนที่มีคำตอบ / Login / คะแนนกิจกรรม สำหรับวันที่นี้")
-            else:
-                existing_scores = (
-                    {row["student_id"]: row["score"] for _, row in scores_df.iterrows()}
-                    if not scores_df.empty
-                    else {}
-                )
-
-                st.markdown("**กำหนด Activity Score (สามารถใส่ทศนิยมได้ เช่น 0.50, 1.25)**")
-                score_rows_input = []
-
-                for sid in all_ids:
-                    cols = st.columns([3, 2])
-                    cols[0].write(sid)
-                    val = cols[1].number_input(
-                        "Score",
-                        key=f"activity_score_{score_date}_{sid}",
-                        value=float(existing_scores.get(sid, 0.0)),
-                        step=0.01,
-                        format="%.2f",
-                    )
-                    score_rows_input.append((sid, val))
-
-                if st.button("💾 Save Activity Scores", use_container_width=True):
-                    rows_to_save = [
-                        (sid, float(val), "") for sid, val in score_rows_input
-                    ]
-                    save_class_scores(score_date, rows_to_save)
-                    st.success("บันทึก Activity Score สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
 
         st.caption(
             "Tip: Students can append extra questions before submitting. Default question set is provided by the teacher per Date/Week."
