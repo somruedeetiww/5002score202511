@@ -1,3 +1,4 @@
+
 # app.py — Streamlit Prototype: DADS9 - 5002 Score
 # - Student can append unlimited questions before preview/submit
 # - Safe Back/Next, progress clamped
@@ -343,7 +344,7 @@ def load_student_groups(date_week: str | None) -> dict[str, str]:
 
 def load_score_weights() -> tuple[float, float, float]:
     """
-    (still exists in DB but NOT used in Score Overview now)
+    (Still defined but not used in Score Overview tab now)
     """
     con = get_con()
     df = pd.read_sql_query(
@@ -361,6 +362,9 @@ def load_score_weights() -> tuple[float, float, float]:
 
 
 def save_score_weights(w_answers: float, w_class: float, w_part: float) -> None:
+    """
+    (Still defined but not used in Score Overview tab now)
+    """
     con = get_con()
     cur = con.cursor()
     cur.execute(
@@ -420,7 +424,7 @@ with tab_student:
             help="Use same label as teacher's question set.",
         )
 
-    start_col, login_col = st.columns([1, 1])
+    start_col, login_col = st.columns(2)
     with start_col:
         start = st.button("✅ START", use_container_width=True)
     with login_col:
@@ -480,7 +484,10 @@ with tab_student:
             st.session_state.answers = (st.session_state.answers + [""] * total)[:total]
         key_a = f"a_{q_idx}"
         st.session_state.answers[q_idx] = st.text_area(
-            "Your Answer", value=st.session_state.answers[q_idx], height=140, key=key_a
+            "Your Answer",
+            value=st.session_state.answers[q_idx],
+            height=140,
+            key=key_a,
         )
 
         group_value = st.text_input(
@@ -493,7 +500,7 @@ with tab_student:
         current_a_filled = st.session_state.answers[q_idx].strip() != ""
         allow_next = current_a_filled
 
-        c1, c2 = st.columns([1, 1])
+        c1, c2 = st.columns(2)
         with c1:
             if st.button("⬅️ Back", use_container_width=True, disabled=(q_idx == 0)):
                 st.session_state.q_index = max(0, q_idx - 1)
@@ -577,7 +584,7 @@ with tab_teacher:
     if access_code.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อจัดการชุดคำถามและตรวจคำตอบ")
     else:
-        m1, m2 = st.columns([1, 1])
+        m1, m2 = st.columns(2)
         with m1:
             teacher_name = st.text_input("Teacher Name", placeholder="e.g., Ms. June")
         with m2:
@@ -623,7 +630,7 @@ with tab_teacher:
                 )
             st.session_state["tmp_questions"] = new_questions
 
-            cqs1, cqs2 = st.columns([1, 1])
+            cqs1, cqs2 = st.columns(2)
             with cqs1:
                 if st.button("💾 Save Question Set", use_container_width=True):
                     save_question_set(manage_date.strip(), new_questions)
@@ -636,7 +643,7 @@ with tab_teacher:
 
         st.divider()
 
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns(2)
         with c1:
             filter_date = st.text_input(
                 "Filter Date / Week", value=manage_date, placeholder="YYYY-MM-DD"
@@ -765,14 +772,14 @@ with tab_teacher_part:
 
                 st.markdown("**รายการนักเรียนที่กด LOGIN และจำนวนครั้งที่มีส่วนร่วมในคาบ**")
 
-                hcols = st.columns([3, 1, 1, 1])
+                hcols = st.columns(4)
                 hcols[0].markdown("**Student ID**")
                 hcols[1].markdown("**−**")
                 hcols[2].markdown("**Participation**")
                 hcols[3].markdown("**+**")
 
                 for sid in all_ids:
-                    cols = st.columns([3, 1, 1, 1])
+                    cols = st.columns(4)
                     cols[0].write(sid)
 
                     if cols[1].button(
@@ -831,22 +838,19 @@ with tab_teacher_total:
     if access_code_total.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูภาพรวมคะแนนกิจกรรมของนักเรียน")
     else:
-        st.caption(
-            "Overview of score: หนึ่งแถวต่อนักเรียน แต่ละคอลัมน์คือ Activity Score ตาม Date / Week และ Total Score คือผลรวมทุกกิจกรรม"
-        )
+        st.caption("Overview of activity scores per student and per Date / Week.")
 
         con = get_con()
-        # Use only activity scores (class_scores)
         df_cls = pd.read_sql_query(
-            "SELECT student_id, date_week, score FROM class_scores",
+            "SELECT student_id, date_week, score FROM class_scores ORDER BY date_week",
             con,
         )
         con.close()
 
         if df_cls.empty:
-            st.info("ยังไม่มี Activity Score ในระบบ (class_scores ว่างอยู่)")
+            st.info("ยังไม่มีข้อมูล Activity Score ในระบบ")
         else:
-            # Pivot: one row per student, one column per date_week
+            # Pivot: rows = student, columns = date_week
             pivot = df_cls.pivot_table(
                 index="student_id",
                 columns="date_week",
@@ -855,32 +859,30 @@ with tab_teacher_total:
                 fill_value=0.0,
             )
 
-            # Sort date columns
-            pivot = pivot.sort_index(axis=1)
+            # Rename columns to "date-activity1"
+            new_cols = [f"{str(col)}-activity1" for col in pivot.columns]
+            pivot.columns = new_cols
 
-            # Compute total score (sum of all activity scores)
-            pivot["Total Score"] = pivot.sum(axis=1)
+            # Ensure float, round nicely
+            pivot = pivot.astype(float).round(2)
 
-            # Tidy column names and index
-            pivot_df = pivot.reset_index().rename(columns={"student_id": "Student ID"})
+            activity_cols = list(pivot.columns)
+            pivot["Total Score"] = pivot[activity_cols].sum(axis=1).round(2)
 
-            # Optional: round scores for nicer display
-            for col in pivot_df.columns:
-                if col not in ("Student ID",):
-                    pivot_df[col] = pivot_df[col].astype(float).round(2)
+            pivot = pivot.reset_index()
+            pivot = pivot.rename(columns={"student_id": "Student ID"})
 
-            st.markdown("### Overview of score")
+            st.markdown("### overview of score")
             st.dataframe(
-                pivot_df,
+                pivot,
                 hide_index=True,
                 use_container_width=True,
             )
 
-            # Export overview as CSV
-            csv_overview = pivot_df.to_csv(index=False).encode("utf-8")
+            csv_total = pivot.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Export Score Overview CSV",
-                csv_overview,
+                csv_total,
                 file_name="score_overview_activity_by_date.csv",
                 mime="text/csv",
                 use_container_width=True,
