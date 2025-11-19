@@ -343,9 +343,14 @@ st.session_state.setdefault("answers_export_label", "all")
 
 st.title("📚 DADS9 - 5002 Score")
 
-# 3 pages: Student, Teacher, Teacher (Participation)
-tab_student, tab_teacher, tab_teacher_part = st.tabs(
-    ["👩‍🎓 Student", "👨‍🏫 Teacher", "👨‍🏫 Teacher (Student Participation)"]
+# 4 pages: Student, Teacher, Teacher (Participation), Teacher (Total Score)
+tab_student, tab_teacher, tab_teacher_part, tab_teacher_total = st.tabs(
+    [
+        "👩‍🎓 Student",
+        "👨‍🏫 Teacher",
+        "👨‍🏫 Teacher (Student Participation)",
+        "👨‍🏫 Teacher (Total Score)",
+    ]
 )
 
 
@@ -893,3 +898,122 @@ with tab_teacher_part:
                     rows = [(sid, part_map.get(sid, 0)) for sid in all_ids]
                     save_participation_counts(participation_date, rows)
                     st.success("บันทึกจำนวนครั้งที่มีส่วนร่วมของนักเรียนเรียบร้อยแล้ว")
+
+
+# ---------------- Teacher (Total Score page) ----------------
+with tab_teacher_total:
+    st.subheader("Total Score (Answers + Class Score + Participation)")
+    access_code_total = st.text_input(
+        "Teacher Access Code",
+        type="password",
+        placeholder="Enter password",
+        key="access_code_total",
+    )
+
+    if access_code_total.strip() != "1234":
+        st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนรวมของนักเรียน")
+    else:
+        total_date = st.text_input(
+            "Date / Week (for Total Score)",
+            value=str(date.today()),
+            key="total_score_date_input",
+            help="Use the same label that students selected when they pressed LOGIN and submitted answers.",
+        )
+
+        total_date = total_date.strip()
+        if not total_date:
+            st.info("กรุณากรอกวันที่ / สัปดาห์ ก่อน")
+        else:
+            # Load data needed for combination
+            logged_students = list_logged_students(total_date)
+            answer_counts = load_answer_counts(total_date)
+            participation_counts = load_participation_counts(total_date)
+            scores_df = load_class_scores(total_date)
+            group_map = load_student_groups(total_date)
+
+            ids_from_login = (
+                logged_students["student_id"].tolist()
+                if not logged_students.empty
+                else []
+            )
+            ids_from_scores = (
+                scores_df["student_id"].tolist() if not scores_df.empty else []
+            )
+
+            all_ids = sorted(
+                set(ids_from_login)
+                | set(answer_counts.keys())
+                | set(participation_counts.keys())
+                | set(ids_from_scores)
+            )
+
+            if not all_ids:
+                st.info("ยังไม่มีข้อมูลสำหรับวันที่นี้")
+            else:
+                existing_scores = (
+                    {row["student_id"]: row["score"] for _, row in scores_df.iterrows()}
+                    if not scores_df.empty
+                    else {}
+                )
+
+                rows = []
+                for sid in all_ids:
+                    ans = answer_counts.get(sid, 0)
+                    cls = existing_scores.get(sid, 0.0) or 0.0
+                    part = participation_counts.get(sid, 0)
+                    group_label = group_map.get(sid, "").strip()
+                    total = ans + cls + part
+                    rows.append(
+                        {
+                            "Student ID": sid,
+                            "Group": group_label,
+                            "Answers": ans,
+                            "Class Score": cls,
+                            "Participation": part,
+                            "Total": total,
+                        }
+                    )
+
+                total_df = pd.DataFrame(rows)
+                st.markdown("**คะแนนรวมตามนักเรียน**")
+                st.dataframe(
+                    total_df,
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+                if not total_df.empty:
+                    # Summary by group
+                    group_df = (
+                        total_df.assign(
+                            Group=total_df["Group"].apply(
+                                lambda g: g if g else "ไม่ระบุกลุ่ม"
+                            )
+                        )
+                        .groupby("Group", as_index=False)
+                        .agg(
+                            Members=("Student ID", "count"),
+                            Answers=("Answers", "sum"),
+                            ClassScore=("Class Score", "sum"),
+                            Participation=("Participation", "sum"),
+                            Total=("Total", "sum"),
+                        )
+                    )
+                    group_df.rename(columns={"ClassScore": "Class Score"}, inplace=True)
+                    st.markdown("**สรุปคะแนนรวมตามกลุ่ม**")
+                    st.dataframe(
+                        group_df,
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                # Export total scores for this date
+                csv_total = total_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇️ Export Total Score CSV",
+                    csv_total,
+                    file_name=f"total_scores_{total_date}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="export_total_scores_csv",
+                )
