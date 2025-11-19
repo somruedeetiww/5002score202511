@@ -499,7 +499,7 @@ with tab_student:
         current_a_filled = st.session_state.answers[q_idx].strip() != ""
         allow_next = current_q_filled and current_a_filled
 
-        # Controls row
+        # Controls row (Back / Next)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("⬅️ Back", use_container_width=True, disabled=(q_idx == 0)):
@@ -509,19 +509,23 @@ with tab_student:
             if st.button(
                 "➡️ Next",
                 use_container_width=True,
-                disabled=not allow_next,
+                disabled=(q_idx >= total - 1) or (not allow_next),
                 key=f"next_btn_{q_idx}",
             ):
-                if q_idx >= len(st.session_state.current_questions) - 1:
-                    st.session_state.current_questions.append("")
-                    st.session_state.answers.append("")
-                st.session_state.q_index = min(
-                    len(st.session_state.current_questions) - 1, q_idx + 1
-                )
+                # Move to next existing question; do NOT auto-add a new blank question
+                st.session_state.q_index = min(total - 1, q_idx + 1)
                 st.session_state.show_preview = False
                 st.rerun()
 
-        # Check if all filled for preview
+        # Button to add a brand-new question at the end
+        if st.button("➕ Add Question", use_container_width=True):
+            st.session_state.current_questions.append("")
+            st.session_state.answers.append("")
+            st.session_state.q_index = len(st.session_state.current_questions) - 1
+            st.session_state.show_preview = False
+            st.rerun()
+
+        # Check if all questions and answers are filled (for existing questions)
         all_filled = all(
             q.strip() != "" for q in st.session_state.current_questions
         ) and all(
