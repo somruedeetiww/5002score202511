@@ -889,7 +889,7 @@ with tab_teacher_total:
     if access_code_total.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนภาพรวมของนักเรียน")
     else:
-        st.caption("ตารางภาพรวมคะแนนจาก Activity Score ในแต่ละวันที่มีการให้คะแนน")
+        st.caption("ตารางภาพรวมคะแนนจาก Activity Score ในแต่ละวันที่มีการให้คะแนน (แยกแต่ละกิจกรรม)")
 
         con = get_con()
         df_cls = pd.read_sql_query(
@@ -901,32 +901,72 @@ with tab_teacher_total:
         if df_cls.empty:
             st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมในระบบ")
         else:
-            # unique dates (date_week) sorted
+            # ใส่ลำดับกิจกรรมในแต่ละวันต่อคน: activity_idx = 1,2,3,...
+            df_cls = df_cls.copy()
+            df_cls["activity_idx"] = (
+                df_cls.sort_values(["student_id", "date_week"])
+                .groupby(["student_id", "date_week"])
+                .cumcount()
+                + 1
+            )
+
+            # จำนวนกิจกรรมสูงสุดต่อวัน (ใช้สำหรับสร้างจำนวนคอลัมน์)
+            max_act_by_date = (
+                df_cls.groupby("date_week")["activity_idx"].max().to_dict()
+            )
+
+            # วันที่ทั้งหมด (จัดเรียง)
             dates = sorted(df_cls["date_week"].dropna().unique().tolist())
-            # unique student IDs sorted
+            # รายชื่อนักเรียนทั้งหมด
             students = sorted(df_cls["student_id"].dropna().unique().tolist())
+
+            # ฟังก์ชันช่วยแปลงรูปแบบวันที่เป็น dd-mm-YYYY
+            def format_date_label(d: str) -> str:
+                try:
+                    return pd.to_datetime(d).strftime("%d-%m-%Y")
+                except Exception:
+                    return d
+
+            # เตรียมลิสต์ชื่อคอลัมน์กิจกรรมทั้งหมดตามวันที่และจำนวนกิจกรรมสูงสุดในวันนั้น
+            activity_columns = []
+            for d in dates:
+                label_date = format_date_label(d)
+                max_act = int(max_act_by_date.get(d, 0))
+                for act_idx in range(1, max_act + 1):
+                    col_name = f"{label_date}activity{act_idx}"
+                    activity_columns.append(col_name)
 
             rows = []
             for sid in students:
                 row = {"Student ID": sid}
-                sid_scores = (
-                    df_cls[df_cls["student_id"] == sid]
-                    .set_index("date_week")["score"]
-                    .to_dict()
-                )
+                sid_df = df_cls[df_cls["student_id"] == sid]
 
                 total_score = 0.0
+                # เติมค่าคะแนนในแต่ละคอลัมน์ (ถ้าไม่มีให้เป็น 0)
                 for d in dates:
-                    # column name format: date-activity1 (e.g., 2025-11-19-activity1)
-                    col_name = f"{d}-activity1"
-                    val = float(sid_scores.get(d, 0.0) or 0.0)
-                    row[col_name] = round(val, 2)
-                    total_score += val
+                    label_date = format_date_label(d)
+                    max_act = int(max_act_by_date.get(d, 0))
+                    for act_idx in range(1, max_act + 1):
+                        col_name = f"{label_date}activity{act_idx}"
+                        match = sid_df[
+                            (sid_df["date_week"] == d)
+                            & (sid_df["activity_idx"] == act_idx)
+                        ]
+                        if not match.empty:
+                            val = float(match["score"].iloc[0] or 0.0)
+                        else:
+                            val = 0.0
+                        row[col_name] = round(val, 2)
+                        total_score += val
 
                 row["Total Score"] = round(total_score, 2)
                 rows.append(row)
 
             overview_df = pd.DataFrame(rows)
+
+            # จัดลำดับคอลัมน์: Student ID, ตามด้วยคอลัมน์กิจกรรมทั้งหมด, แล้วปิดท้ายด้วย Total Score
+            final_cols = ["Student ID"] + activity_columns + ["Total Score"]
+            overview_df = overview_df.reindex(columns=final_cols)
 
             st.markdown("### overview of score")
             st.dataframe(
