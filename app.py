@@ -84,10 +84,23 @@ def init_db():
         """
     )
 
+    # ensure group_name column exists on answers
     cur.execute("PRAGMA table_info(answers)")
     existing_cols = [row[1] for row in cur.fetchall()]
     if "group_name" not in existing_cols:
         cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
+
+    # global weighting scheme (single row, id = 1)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS score_weights (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            w_answers REAL NOT NULL DEFAULT 1.0,
+            w_class REAL NOT NULL DEFAULT 1.0,
+            w_part REAL NOT NULL DEFAULT 1.0
+        );
+        """
+    )
 
     con.commit()
     con.close()
@@ -325,6 +338,47 @@ def load_student_groups(date_week: str | None) -> dict[str, str]:
     return dict(zip(df["student_id"], df["group_name"]))
 
 
+def load_score_weights() -> tuple[float, float, float]:
+    """
+    Load global weighting scheme (w_answers, w_class, w_part).
+    If none is saved yet, return (1.0, 1.0, 1.0).
+    """
+    con = get_con()
+    df = pd.read_sql_query(
+        "SELECT w_answers, w_class, w_part FROM score_weights WHERE id = 1",
+        con,
+    )
+    con.close()
+    if df.empty:
+        return 1.0, 1.0, 1.0
+    row = df.iloc[0]
+    w_answers = row["w_answers"] if row["w_answers"] is not None else 1.0
+    w_class = row["w_class"] if row["w_class"] is not None else 1.0
+    w_part = row["w_part"] if row["w_part"] is not None else 1.0
+    return float(w_answers), float(w_class), float(w_part)
+
+
+def save_score_weights(w_answers: float, w_class: float, w_part: float) -> None:
+    """
+    Save global weighting scheme so it is reused in future sessions.
+    """
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO score_weights (id, w_answers, w_class, w_part)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            w_answers = excluded.w_answers,
+            w_class = excluded.w_class,
+            w_part = excluded.w_part
+        """,
+        (float(w_answers), float(w_class), float(w_part)),
+    )
+    con.commit()
+    con.close()
+
+
 # ---------- App ----------
 init_db()
 st.set_page_config(page_title="DADS9 - 5002 Score", page_icon="✅", layout="centered")
@@ -343,13 +397,13 @@ st.session_state.setdefault("answers_export_label", "all")
 
 st.title("📚 DADS9 - 5002 Score")
 
-# 4 pages: Student, Teacher, Teacher (Participation), Teacher (Total Score)
+# 4 pages: Student, Teacher, Teacher (Participation), Teacher (Total Score – All Time)
 tab_student, tab_teacher, tab_teacher_part, tab_teacher_total = st.tabs(
     [
         "👩‍🎓 Student",
         "👨‍🏫 Teacher",
         "👨‍🏫 Teacher (Student Participation)",
-        "👨‍🏫 Teacher (Total Score)",
+        "👨‍🏫 Teacher (Total Score – All Time)",
     ]
 )
 
@@ -900,9 +954,9 @@ with tab_teacher_part:
                     st.success("บันทึกจำนวนครั้งที่มีส่วนร่วมของนักเรียนเรียบร้อยแล้ว")
 
 
-# ---------------- Teacher (Total Score page) ----------------
+# ---------------- Teacher (Total Score – All Time) ----------------
 with tab_teacher_total:
-    st.subheader("Total Score (Answers + Class Score + Participation)")
+    st.subheader("Total Score – All Time (Answers + Class Score + Participation)")
     access_code_total = st.text_input(
         "Teacher Access Code",
         type="password",
@@ -913,107 +967,193 @@ with tab_teacher_total:
     if access_code_total.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนรวมของนักเรียน")
     else:
-        total_date = st.text_input(
-            "Date / Week (for Total Score)",
-            value=str(date.today()),
-            key="total_score_date_input",
-            help="Use the same label that students selected when they pressed LOGIN and submitted answers.",
+        st.caption(
+            "คะแนนรวมสะสมจากทุกวันที่มีข้อมูล: "
+            "จำนวนคำตอบ (Answers) + คะแนนในคลาส (Class Score) + การมีส่วนร่วม (Participation)."
         )
 
-        total_date = total_date.strip()
-        if not total_date:
-            st.info("กรุณากรอกวันที่ / สัปดาห์ ก่อน")
+        # Load all-time data
+        con = get_con()
+
+        # Answers: total count per student across all dates
+        df_ans = pd.read_sql_query(
+            "SELECT student_id, COUNT(*) AS Answers FROM answers GROUP BY student_id",
+            con,
+        )
+
+        # Class scores: sum of scores per student across all dates
+        df_cls = pd.read_sql_query(
+            "SELECT student_id, SUM(score) AS ClassScore FROM class_scores GROUP BY student_id",
+            con,
+        )
+
+        # Participation: total participation per student across all dates
+        df_part = pd.read_sql_query(
+            "SELECT student_id, SUM(participation) AS Participation "
+            "FROM participation GROUP BY student_id",
+            con,
+        )
+
+        # Group name: any non-empty group_name from answers per student
+        df_group = pd.read_sql_query(
+            """
+            SELECT student_id, MAX(COALESCE(group_name, '')) AS group_name
+            FROM answers
+            GROUP BY student_id
+            """,
+            con,
+        )
+
+        con.close()
+
+        answer_counts_all = (
+            dict(zip(df_ans["student_id"], df_ans["Answers"]))
+            if not df_ans.empty
+            else {}
+        )
+        class_scores_all = (
+            dict(zip(df_cls["student_id"], df_cls["ClassScore"]))
+            if not df_cls.empty
+            else {}
+        )
+        participation_all = (
+            dict(zip(df_part["student_id"], df_part["Participation"]))
+            if not df_part.empty
+            else {}
+        )
+        group_map_all = (
+            dict(zip(df_group["student_id"], df_group["group_name"]))
+            if not df_group.empty
+            else {}
+        )
+
+        all_ids = sorted(
+            set(answer_counts_all.keys())
+            | set(class_scores_all.keys())
+            | set(participation_all.keys())
+            | set(group_map_all.keys())
+        )
+
+        if not all_ids:
+            st.info("ยังไม่มีข้อมูลคะแนนรวม (ยังไม่มีคำตอบ คะแนนในคลาส หรือการมีส่วนร่วมในระบบ)")
         else:
-            # Load data needed for combination
-            logged_students = list_logged_students(total_date)
-            answer_counts = load_answer_counts(total_date)
-            participation_counts = load_participation_counts(total_date)
-            scores_df = load_class_scores(total_date)
-            group_map = load_student_groups(total_date)
+            # ---------- Load saved weights as defaults ----------
+            db_w_answers, db_w_class, db_w_part = load_score_weights()
 
-            ids_from_login = (
-                logged_students["student_id"].tolist()
-                if not logged_students.empty
-                else []
-            )
-            ids_from_scores = (
-                scores_df["student_id"].tolist() if not scores_df.empty else []
-            )
+            # Initialize session state for weights only once
+            if "w_answers_all" not in st.session_state:
+                st.session_state["w_answers_all"] = db_w_answers
+            if "w_class_all" not in st.session_state:
+                st.session_state["w_class_all"] = db_w_class
+            if "w_part_all" not in st.session_state:
+                st.session_state["w_part_all"] = db_w_part
 
-            all_ids = sorted(
-                set(ids_from_login)
-                | set(answer_counts.keys())
-                | set(participation_counts.keys())
-                | set(ids_from_scores)
-            )
-
-            if not all_ids:
-                st.info("ยังไม่มีข้อมูลสำหรับวันที่นี้")
-            else:
-                existing_scores = (
-                    {row["student_id"]: row["score"] for _, row in scores_df.iterrows()}
-                    if not scores_df.empty
-                    else {}
+            st.markdown("### 🎚 Weighting Scheme")
+            c_w1, c_w2, c_w3 = st.columns(3)
+            with c_w1:
+                w_answers = st.number_input(
+                    "Weight: Answers",
+                    value=float(st.session_state["w_answers_all"]),
+                    step=0.1,
+                    key="w_answers_all",
+                )
+            with c_w2:
+                w_class = st.number_input(
+                    "Weight: Class Score",
+                    value=float(st.session_state["w_class_all"]),
+                    step=0.1,
+                    key="w_class_all",
+                )
+            with c_w3:
+                w_part = st.number_input(
+                    "Weight: Participation",
+                    value=float(st.session_state["w_part_all"]),
+                    step=0.1,
+                    key="w_part_all",
                 )
 
-                rows = []
-                for sid in all_ids:
-                    ans = answer_counts.get(sid, 0)
-                    cls = existing_scores.get(sid, 0.0) or 0.0
-                    part = participation_counts.get(sid, 0)
-                    group_label = group_map.get(sid, "").strip()
-                    total = ans + cls + part
-                    rows.append(
-                        {
-                            "Student ID": sid,
-                            "Group": group_label,
-                            "Answers": ans,
-                            "Class Score": cls,
-                            "Participation": part,
-                            "Total": total,
-                        }
-                    )
+            st.caption(
+                f"สูตร: Final Score = Answers × {w_answers} + Class Score × {w_class} + Participation × {w_part}"
+            )
 
-                total_df = pd.DataFrame(rows)
-                st.markdown("**คะแนนรวมตามนักเรียน**")
+            # Save current weights as default for future sessions
+            if st.button("💾 Save weights as default", use_container_width=True):
+                save_score_weights(w_answers, w_class, w_part)
+                st.success("บันทึกค่าน้ำหนักเป็นค่าเริ่มต้นสำหรับครั้งถัดไปเรียบร้อยแล้ว ✅")
+
+            # ---------- Build per-student totals ----------
+            rows = []
+            for sid in all_ids:
+                ans = answer_counts_all.get(sid, 0)
+                cls = class_scores_all.get(sid, 0.0) or 0.0
+                part = participation_all.get(sid, 0) or 0
+                group_label = (group_map_all.get(sid, "") or "").strip()
+
+                total_raw = ans + cls + part
+                final_score = ans * w_answers + cls * w_class + part * w_part
+
+                rows.append(
+                    {
+                        "Student ID": sid,
+                        "Group": group_label,
+                        "Answers": ans,
+                        "Class Score": cls,
+                        "Participation": part,
+                        "Total (raw)": total_raw,
+                        "Final Score": final_score,
+                    }
+                )
+
+            total_df = pd.DataFrame(rows)
+
+            st.markdown("### 📊 คะแนนรวมสะสมตามนักเรียน (ทุกครั้งที่ให้คะแนน)")
+            st.dataframe(
+                total_df,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            if not total_df.empty:
+                # ---------- Group summary with Final Score ----------
+                group_df = (
+                    total_df.assign(
+                        Group=total_df["Group"].apply(
+                            lambda g: g if g else "ไม่ระบุกลุ่ม"
+                        )
+                    )
+                    .groupby("Group", as_index=False)
+                    .agg(
+                        Members=("Student ID", "count"),
+                        Answers=("Answers", "sum"),
+                        ClassScore=("Class Score", "sum"),
+                        Participation=("Participation", "sum"),
+                        TotalRaw=("Total (raw)", "sum"),
+                        FinalScore=("Final Score", "sum"),
+                    )
+                )
+                group_df.rename(
+                    columns={
+                        "ClassScore": "Class Score",
+                        "TotalRaw": "Total (raw)",
+                        "FinalScore": "Final Score",
+                    },
+                    inplace=True,
+                )
+
+                st.markdown("### 👥 สรุปคะแนนรวมสะสมตามกลุ่ม")
                 st.dataframe(
-                    total_df,
+                    group_df,
                     hide_index=True,
                     use_container_width=True,
                 )
 
-                if not total_df.empty:
-                    # Summary by group
-                    group_df = (
-                        total_df.assign(
-                            Group=total_df["Group"].apply(
-                                lambda g: g if g else "ไม่ระบุกลุ่ม"
-                            )
-                        )
-                        .groupby("Group", as_index=False)
-                        .agg(
-                            Members=("Student ID", "count"),
-                            Answers=("Answers", "sum"),
-                            ClassScore=("Class Score", "sum"),
-                            Participation=("Participation", "sum"),
-                            Total=("Total", "sum"),
-                        )
-                    )
-                    group_df.rename(columns={"ClassScore": "Class Score"}, inplace=True)
-                    st.markdown("**สรุปคะแนนรวมตามกลุ่ม**")
-                    st.dataframe(
-                        group_df,
-                        hide_index=True,
-                        use_container_width=True,
-                    )
-
-                # Export total scores for this date
-                csv_total = total_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇️ Export Total Score CSV",
-                    csv_total,
-                    file_name=f"total_scores_{total_date}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="export_total_scores_csv",
-                )
+            # ---------- Export all-time totals with Final Score ----------
+            csv_total = total_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Export Total Score CSV (All Dates, with Final Score)",
+                csv_total,
+                file_name="total_scores_all_dates_with_final_score.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="export_total_scores_csv",
+            )
