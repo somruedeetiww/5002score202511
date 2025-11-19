@@ -714,15 +714,14 @@ with tab_teacher:
                     display_df["Answer Count"].fillna(0).astype(int)
                 )
                 display_df["Activity Score"] = display_df["Activity Score"].fillna(0.0)
-                display_df["Total Score"] = (
-                    display_df["Answer Count"] + display_df["Activity Score"]
-                )
+
+                # NOTE: Total Score column removed as requested
 
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 st.session_state["answers_export_df"] = display_df
                 st.session_state["answers_export_label"] = effective_filter or "all"
 
-        # New: Activity Score input (float) instead of old Class Scoring session
+        # Activity Score input (float) instead of old Class Scoring session
         with st.expander("📝 Activity Score (per date)", expanded=False):
             score_date = manage_date.strip()
 
