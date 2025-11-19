@@ -2,6 +2,9 @@
 # - Student can append unlimited questions before preview/submit
 # - Safe Back/Next, progress clamped
 # - Optional edit of question text per submission
+# - Teacher overview: Student ID, Participation Score, Total Score
+# - Total Score = Sum(Activity Scores) + Participation Score
+#   Participation Score = (total_participation / max_total_participation) * 5
 
 import streamlit as st
 import sqlite3
@@ -91,7 +94,7 @@ def init_db():
     if "group_name" not in existing_cols:
         cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
 
-    # global weighting scheme (single row, id = 1) – currently unused but kept for future
+    # global weighting scheme (single row, id = 1) – not used yet, but kept for future
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS score_weights (
@@ -262,6 +265,7 @@ def load_class_scores(date_week: str | None) -> pd.DataFrame:
 def save_class_scores(date_week: str, score_rows) -> None:
     """
     score_rows: iterable of (student_id, score, note)
+    Stores one summed score per (student_id, date_week).
     """
     con = get_con()
     cur = con.cursor()
@@ -346,7 +350,7 @@ def load_score_weights() -> tuple[float, float, float]:
     """
     Load global weighting scheme (w_answers, w_class, w_part).
     If none is saved yet, return (1.0, 1.0, 1.0).
-    Currently not used, but kept for future.
+    (Currently not used in calculations, but kept for extension.)
     """
     con = get_con()
     df = pd.read_sql_query(
@@ -709,7 +713,9 @@ with tab_teacher:
 
                 # --- Editable Activity Score only when a single date is selected ---
                 if effective_filter:
-                    st.markdown("**Check Answers & Edit Activity Score (this date only)**")
+                    st.markdown(
+                        "**Check Answers & Edit Activity Score (this date only)**"
+                    )
                     edited_df = st.data_editor(
                         display_df,
                         hide_index=True,
@@ -751,9 +757,11 @@ with tab_teacher:
                             for _, row in grouped.iterrows()
                         ]
                         save_class_scores(effective_filter, rows_to_save)
-                        st.success("บันทึก Activity Score (SUM) สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
+                        st.success(
+                            "บันทึก Activity Score (ใช้ผลรวมของคะแนนต่อคน) สำหรับวันที่นี้เรียบร้อยแล้ว ✅"
+                        )
 
-                    # use edited_df for export
+                    # use edited_df for export (if needed in future)
                     st.session_state["answers_export_df"] = edited_df
                 else:
                     # all dates → read-only
@@ -892,8 +900,7 @@ with tab_teacher_total:
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนภาพรวมของนักเรียน")
     else:
         st.caption(
-            "ตารางภาพรวมคะแนน: Total Score = SUM(Activity Score ทุกวันที่ให้คะแนน) "
-            "+ SUM(คะแนน Participation โดยคิดแบบ (no. participation / max participation ของวันนั้น) × 5)."
+            "ตารางภาพรวมคะแนน: รวม Activity Score ทุกวัน และคะแนน Participation (0–5) ต่อคน"
         )
 
         con = get_con()
@@ -901,8 +908,13 @@ with tab_teacher_total:
             "SELECT student_id, date_week, score FROM class_scores",
             con,
         )
+        # participation: sum over all dates per student
         df_part = pd.read_sql_query(
-            "SELECT student_id, date_week, participation FROM participation",
+            """
+            SELECT student_id, SUM(participation) AS total_participation
+            FROM participation
+            GROUP BY student_id
+            """,
             con,
         )
         con.close()
@@ -910,86 +922,83 @@ with tab_teacher_total:
         if df_cls.empty and df_part.empty:
             st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมหรือการมีส่วนร่วมในระบบ")
         else:
-            # --- Aggregate Activity Score per student across all dates ---
+            # Sum Activity Scores per student across all dates
             if df_cls.empty:
-                df_cls_agg = pd.DataFrame(columns=["student_id", "class_score_total"])
+                agg_scores = pd.DataFrame(columns=["student_id", "activity_total"])
             else:
-                df_cls_agg = (
+                agg_scores = (
                     df_cls.groupby("student_id")["score"]
                     .sum()
-                    .reset_index()
-                    .rename(columns={"score": "class_score_total"})
+                    .reset_index(name="activity_total")
                 )
 
-            # --- Compute participation score per student ---
-            part_score_per_student = {}
-            if not df_part.empty:
-                # For each date, scale participation to 0–5 based on max for that date
-                for date_week, group in df_part.groupby("date_week"):
-                    max_part = group["participation"].max()
-                    if max_part is None or max_part <= 0:
-                        continue
-                    for _, row in group.iterrows():
-                        sid = row["student_id"]
-                        part = row["participation"] or 0
-                        score_p = (part / max_part) * 5.0
-                        part_score_per_student[sid] = (
-                            part_score_per_student.get(sid, 0.0) + score_p
-                        )
-
-            if part_score_per_student:
-                df_part_score = pd.DataFrame(
-                    [
-                        {"student_id": sid, "part_score_total": sc}
-                        for sid, sc in part_score_per_student.items()
-                    ]
+            # Total participation per student across all dates
+            if df_part.empty:
+                part_scores = pd.DataFrame(
+                    columns=["student_id", "total_participation"]
                 )
             else:
-                df_part_score = pd.DataFrame(columns=["student_id", "part_score_total"])
+                part_scores = df_part.copy()
+                part_scores["total_participation"] = part_scores[
+                    "total_participation"
+                ].fillna(0).astype(int)
 
-            # --- Combine to Total Score per student ---
+            # Merge students from both tables
             all_students = sorted(
-                set(df_cls_agg["student_id"].tolist())
-                | set(df_part_score["student_id"].tolist())
-            )
-            overview_df = pd.DataFrame({"Student ID": all_students})
-
-            overview_df = overview_df.merge(
-                df_cls_agg, left_on="Student ID", right_on="student_id", how="left"
-            )
-            overview_df = overview_df.merge(
-                df_part_score, left_on="Student ID", right_on="student_id", how="left"
+                set(agg_scores["student_id"].tolist())
+                | set(part_scores["student_id"].tolist())
             )
 
-            # Drop helper columns
-            if "student_id_x" in overview_df.columns:
-                overview_df = overview_df.drop(columns=["student_id_x"])
-            if "student_id_y" in overview_df.columns:
-                overview_df = overview_df.drop(columns=["student_id_y"])
-
-            overview_df["class_score_total"] = (
-                overview_df["class_score_total"].fillna(0.0)
+            # Build map for quick lookup
+            act_map = (
+                agg_scores.set_index("student_id")["activity_total"].to_dict()
+                if not agg_scores.empty
+                else {}
             )
-            overview_df["part_score_total"] = (
-                overview_df["part_score_total"].fillna(0.0)
+            part_map_total = (
+                part_scores.set_index("student_id")["total_participation"].to_dict()
+                if not part_scores.empty
+                else {}
             )
 
-            overview_df["Total Score"] = (
-                overview_df["class_score_total"] + overview_df["part_score_total"]
-            ).round(2)
+            max_participation = max(part_map_total.values(), default=0)
 
-            # Only show Student ID and Total Score in UI
-            overview_display = overview_df[["Student ID", "Total Score"]]
+            rows = []
+            for sid in all_students:
+                activity_total = float(act_map.get(sid, 0.0))
+                total_part_count = int(part_map_total.get(sid, 0))
 
-            st.markdown("### Overview of Total Score per Student")
+                if max_participation > 0:
+                    participation_score = (total_part_count / max_participation) * 5.0
+                else:
+                    participation_score = 0.0
+
+                total_score = activity_total + participation_score
+
+                rows.append(
+                    {
+                        "Student ID": sid,
+                        "Participation Score": round(participation_score, 2),
+                        "Total Score": round(total_score, 2),
+                    }
+                )
+
+            overview_df = pd.DataFrame(rows)
+
+            # Sort by Total Score (highest first) and then Student ID
+            overview_df = overview_df.sort_values(
+                by=["Total Score", "Student ID"], ascending=[False, True]
+            ).reset_index(drop=True)
+
+            st.markdown("### Overview of Score (Activity + Participation)")
             st.dataframe(
-                overview_display,
+                overview_df,
                 hide_index=True,
                 use_container_width=True,
             )
 
             # Export CSV of this overview
-            csv_overview = overview_display.to_csv(index=False).encode("utf-8")
+            csv_overview = overview_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Export Score Overview CSV",
                 csv_overview,
