@@ -91,7 +91,7 @@ def init_db():
     if "group_name" not in existing_cols:
         cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
 
-    # global weighting scheme (single row, id = 1)
+    # global weighting scheme (single row, id = 1) – currently unused but kept for future
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS score_weights (
@@ -346,6 +346,7 @@ def load_score_weights() -> tuple[float, float, float]:
     """
     Load global weighting scheme (w_answers, w_class, w_part).
     If none is saved yet, return (1.0, 1.0, 1.0).
+    Currently not used, but kept for future.
     """
     con = get_con()
     df = pd.read_sql_query(
@@ -750,7 +751,7 @@ with tab_teacher:
                             for _, row in grouped.iterrows()
                         ]
                         save_class_scores(effective_filter, rows_to_save)
-                        st.success("บันทึก Activity Score สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
+                        st.success("บันทึก Activity Score (SUM) สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
 
                     # use edited_df for export
                     st.session_state["answers_export_df"] = edited_df
@@ -890,35 +891,105 @@ with tab_teacher_total:
     if access_code_total.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนภาพรวมของนักเรียน")
     else:
-        st.caption("ตารางภาพรวมคะแนนจาก Activity Score รวมทุกกิจกรรมของนักเรียน (ทุกวัน)")
+        st.caption(
+            "ตารางภาพรวมคะแนน: Total Score = SUM(Activity Score ทุกวันที่ให้คะแนน) "
+            "+ SUM(คะแนน Participation โดยคิดแบบ (no. participation / max participation ของวันนั้น) × 5)."
+        )
 
         con = get_con()
         df_cls = pd.read_sql_query(
-            "SELECT student_id, score FROM class_scores",
+            "SELECT student_id, date_week, score FROM class_scores",
+            con,
+        )
+        df_part = pd.read_sql_query(
+            "SELECT student_id, date_week, participation FROM participation",
             con,
         )
         con.close()
 
-        if df_cls.empty:
-            st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมในระบบ")
+        if df_cls.empty and df_part.empty:
+            st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมหรือการมีส่วนร่วมในระบบ")
         else:
-            # รวมคะแนนทั้งหมดของแต่ละคน (sum)
-            overview_df = (
-                df_cls.groupby("student_id", as_index=False)["score"]
-                .sum()
-                .rename(columns={"student_id": "Student ID", "score": "Total Score"})
-            )
-            overview_df["Total Score"] = overview_df["Total Score"].fillna(0.0).round(2)
+            # --- Aggregate Activity Score per student across all dates ---
+            if df_cls.empty:
+                df_cls_agg = pd.DataFrame(columns=["student_id", "class_score_total"])
+            else:
+                df_cls_agg = (
+                    df_cls.groupby("student_id")["score"]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={"score": "class_score_total"})
+                )
 
-            st.markdown("### Overview of Score (Total per Student)")
+            # --- Compute participation score per student ---
+            part_score_per_student = {}
+            if not df_part.empty:
+                # For each date, scale participation to 0–5 based on max for that date
+                for date_week, group in df_part.groupby("date_week"):
+                    max_part = group["participation"].max()
+                    if max_part is None or max_part <= 0:
+                        continue
+                    for _, row in group.iterrows():
+                        sid = row["student_id"]
+                        part = row["participation"] or 0
+                        score_p = (part / max_part) * 5.0
+                        part_score_per_student[sid] = (
+                            part_score_per_student.get(sid, 0.0) + score_p
+                        )
+
+            if part_score_per_student:
+                df_part_score = pd.DataFrame(
+                    [
+                        {"student_id": sid, "part_score_total": sc}
+                        for sid, sc in part_score_per_student.items()
+                    ]
+                )
+            else:
+                df_part_score = pd.DataFrame(columns=["student_id", "part_score_total"])
+
+            # --- Combine to Total Score per student ---
+            all_students = sorted(
+                set(df_cls_agg["student_id"].tolist())
+                | set(df_part_score["student_id"].tolist())
+            )
+            overview_df = pd.DataFrame({"Student ID": all_students})
+
+            overview_df = overview_df.merge(
+                df_cls_agg, left_on="Student ID", right_on="student_id", how="left"
+            )
+            overview_df = overview_df.merge(
+                df_part_score, left_on="Student ID", right_on="student_id", how="left"
+            )
+
+            # Drop helper columns
+            if "student_id_x" in overview_df.columns:
+                overview_df = overview_df.drop(columns=["student_id_x"])
+            if "student_id_y" in overview_df.columns:
+                overview_df = overview_df.drop(columns=["student_id_y"])
+
+            overview_df["class_score_total"] = (
+                overview_df["class_score_total"].fillna(0.0)
+            )
+            overview_df["part_score_total"] = (
+                overview_df["part_score_total"].fillna(0.0)
+            )
+
+            overview_df["Total Score"] = (
+                overview_df["class_score_total"] + overview_df["part_score_total"]
+            ).round(2)
+
+            # Only show Student ID and Total Score in UI
+            overview_display = overview_df[["Student ID", "Total Score"]]
+
+            st.markdown("### Overview of Total Score per Student")
             st.dataframe(
-                overview_df,
+                overview_display,
                 hide_index=True,
                 use_container_width=True,
             )
 
             # Export CSV of this overview
-            csv_overview = overview_df.to_csv(index=False).encode("utf-8")
+            csv_overview = overview_display.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Export Score Overview CSV",
                 csv_overview,
