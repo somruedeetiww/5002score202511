@@ -393,7 +393,7 @@ st.session_state.setdefault("answers", DEFAULT_QUESTIONS.copy())
 st.session_state.setdefault("show_preview", False)
 st.session_state.setdefault("teacher_loaded", False)
 st.session_state.setdefault("current_questions", DEFAULT_QUESTIONS.copy())
-st.session_state.setdefault("allow_edit_question", True)  # default ON for convenience
+st.session_state.setdefault("allow_edit_question", True)
 st.session_state.setdefault("group_name", "")
 st.session_state.setdefault("answers_export_df", None)
 st.session_state.setdefault("answers_export_label", "all")
@@ -554,7 +554,6 @@ with tab_student:
             st.dataframe(df_prev, use_container_width=True, hide_index=True)
             colp1, colp2 = st.columns([2, 1])
             with colp2:
-                # Safety: still verify before saving
                 if st.button(
                     "🟦 SUBMIT", use_container_width=True, disabled=not all_filled
                 ):
@@ -713,15 +712,15 @@ with tab_teacher:
                 display_df["Answer Count"] = (
                     display_df["Answer Count"].fillna(0).astype(int)
                 )
-                display_df["Activity Score"] = display_df["Activity Score"].fillna(0.0)
-
-                # NOTE: Total Score column removed as requested
+                display_df["Activity Score"] = (
+                    display_df["Activity Score"].fillna(0.0).round(2)
+                )
 
                 st.dataframe(display_df, hide_index=True, use_container_width=True)
                 st.session_state["answers_export_df"] = display_df
                 st.session_state["answers_export_label"] = effective_filter or "all"
 
-        # Activity Score input (float) instead of old Class Scoring session
+        # Activity Score input (float) section
         with st.expander("📝 Activity Score (per date)", expanded=False):
             score_date = manage_date.strip()
 
@@ -766,7 +765,7 @@ with tab_teacher:
                         "Score",
                         key=f"activity_score_{score_date}_{sid}",
                         value=float(existing_scores.get(sid, 0.0)),
-                        step=0.25,
+                        step=0.01,
                         format="%.2f",
                     )
                     score_rows_input.append((sid, val))
@@ -807,12 +806,9 @@ with tab_teacher_part:
         if not participation_date:
             st.info("กรุณากรอกวันที่ / สัปดาห์ ก่อน")
         else:
-            # 1) Get students who pressed LOGIN on this date
             logged_students = list_logged_students(participation_date)
-            # 2) Get previously saved participation counts
             existing_part = load_participation_counts(participation_date)
 
-            # Union of all student IDs who logged in OR already have participation saved
             ids_from_login = (
                 logged_students["student_id"].tolist()
                 if not logged_students.empty
@@ -823,18 +819,15 @@ with tab_teacher_part:
             if not all_ids:
                 st.info("ยังไม่มีนักเรียนกด LOGIN สำหรับวันที่นี้")
             else:
-                # Keep participation state in session so + / - buttons feel instant
                 state_key = f"participation_values_{participation_date}"
                 if (state_key not in st.session_state) or (
                     st.session_state.get("participation_date") != participation_date
                 ):
-                    # Initialize from DB
                     st.session_state["participation_date"] = participation_date
                     st.session_state[state_key] = {
                         sid: existing_part.get(sid, 0) for sid in all_ids
                     }
                 else:
-                    # Make sure new logins also appear with default 0
                     for sid in all_ids:
                         st.session_state[state_key].setdefault(
                             sid, existing_part.get(sid, 0)
@@ -844,14 +837,12 @@ with tab_teacher_part:
 
                 st.markdown("**รายการนักเรียนที่กด LOGIN และจำนวนครั้งที่มีส่วนร่วมในคาบ**")
 
-                # Header row
                 hcols = st.columns([3, 1, 1, 1])
                 hcols[0].markdown("**Student ID**")
                 hcols[1].markdown("**−**")
                 hcols[2].markdown("**Participation**")
                 hcols[3].markdown("**+**")
 
-                # One row per student
                 for sid in all_ids:
                     cols = st.columns([3, 1, 1, 1])
                     cols[0].write(sid)
@@ -877,7 +868,6 @@ with tab_teacher_part:
                         st.session_state[state_key] = part_map
                         st.rerun()
 
-                # Show a summary table
                 summary_rows_part = [
                     {"Student ID": sid, "Participation": part_map.get(sid, 0)}
                     for sid in all_ids
@@ -890,7 +880,6 @@ with tab_teacher_part:
                     use_container_width=True,
                 )
 
-                # Save to DB
                 if st.button(
                     "💾 Save Participation",
                     use_container_width=True,
@@ -919,29 +908,24 @@ with tab_teacher_total:
             "จำนวนคำตอบ (Answers) + Activity Score + การมีส่วนร่วม (Participation)."
         )
 
-        # Load all-time data
         con = get_con()
 
-        # Answers: total count per student across all dates
         df_ans = pd.read_sql_query(
             "SELECT student_id, COUNT(*) AS Answers FROM answers GROUP BY student_id",
             con,
         )
 
-        # Activity scores: sum of scores per student across all dates
         df_cls = pd.read_sql_query(
             "SELECT student_id, SUM(score) AS ActivityScore FROM class_scores GROUP BY student_id",
             con,
         )
 
-        # Participation: total participation per student across all dates
         df_part = pd.read_sql_query(
             "SELECT student_id, SUM(participation) AS Participation "
             "FROM participation GROUP BY student_id",
             con,
         )
 
-        # Group name: any non-empty group_name from answers per student
         df_group = pd.read_sql_query(
             """
             SELECT student_id, MAX(COALESCE(group_name, '')) AS group_name
@@ -984,10 +968,8 @@ with tab_teacher_total:
         if not all_ids:
             st.info("ยังไม่มีข้อมูลคะแนนรวม (ยังไม่มีคำตอบ Activity Score หรือการมีส่วนร่วมในระบบ)")
         else:
-            # ---------- Load saved weights as defaults ----------
             db_w_answers, db_w_class, db_w_part = load_score_weights()
 
-            # Initialize session state for weights only once
             if "w_answers_all" not in st.session_state:
                 st.session_state["w_answers_all"] = db_w_answers
             if "w_class_all" not in st.session_state:
@@ -1023,12 +1005,10 @@ with tab_teacher_total:
                 f"สูตร: Final Score = Answers × {w_answers} + Activity Score × {w_class} + Participation × {w_part}"
             )
 
-            # Save current weights as default for future sessions
             if st.button("💾 Save weights as default", use_container_width=True):
                 save_score_weights(w_answers, w_class, w_part)
                 st.success("บันทึกค่าน้ำหนักเป็นค่าเริ่มต้นสำหรับครั้งถัดไปเรียบร้อยแล้ว ✅")
 
-            # ---------- Build per-student totals ----------
             rows = []
             for sid in all_ids:
                 ans = answer_counts_all.get(sid, 0)
@@ -1044,10 +1024,10 @@ with tab_teacher_total:
                         "Student ID": sid,
                         "Group": group_label,
                         "Answers": ans,
-                        "Activity Score": act,
+                        "Activity Score": round(act, 2),
                         "Participation": part,
                         "Total (raw)": total_raw,
-                        "Final Score": final_score,
+                        "Final Score": round(final_score, 2),
                     }
                 )
 
@@ -1061,7 +1041,6 @@ with tab_teacher_total:
             )
 
             if not total_df.empty:
-                # ---------- Group summary with Final Score ----------
                 group_df = (
                     total_df.assign(
                         Group=total_df["Group"].apply(
@@ -1094,7 +1073,6 @@ with tab_teacher_total:
                     use_container_width=True,
                 )
 
-            # ---------- Export all-time totals with Final Score ----------
             csv_total = total_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Export Total Score CSV (All Dates, with Final Score)",
