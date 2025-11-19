@@ -59,7 +59,6 @@ def init_db():
         );
         """
     )
-    # initial (old) class_scores table (will be migrated to support activity_idx)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS class_scores (
@@ -67,7 +66,8 @@ def init_db():
             student_id TEXT NOT NULL,
             date_week TEXT NOT NULL,
             score REAL,
-            note TEXT
+            note TEXT,
+            UNIQUE(student_id, date_week) ON CONFLICT REPLACE
         );
         """
     )
@@ -90,7 +90,7 @@ def init_db():
     if "group_name" not in existing_cols:
         cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
 
-    # global weighting scheme (still kept, althoughไม่ใช้ใน overview ใหม่แล้ว)
+    # global weighting scheme (single row, id = 1)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS score_weights (
@@ -101,35 +101,6 @@ def init_db():
         );
         """
     )
-
-    # ---- Migrate class_scores to support multiple activities per date ----
-    cur.execute("PRAGMA table_info(class_scores)")
-    cols = [row[1] for row in cur.fetchall()]
-    if "activity_idx" not in cols:
-        # create new table with activity_idx + unique per (student_id, date_week, activity_idx)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS class_scores_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id TEXT NOT NULL,
-                date_week TEXT NOT NULL,
-                activity_idx INTEGER NOT NULL DEFAULT 1,
-                score REAL,
-                note TEXT,
-                UNIQUE(student_id, date_week, activity_idx) ON CONFLICT REPLACE
-            );
-            """
-        )
-        # copy old data as activity_idx = 1
-        cur.execute(
-            """
-            INSERT INTO class_scores_new (student_id, date_week, activity_idx, score, note)
-            SELECT student_id, date_week, 1 AS activity_idx, score, note
-            FROM class_scores;
-            """
-        )
-        cur.execute("DROP TABLE class_scores;")
-        cur.execute("ALTER TABLE class_scores_new RENAME TO class_scores;")
 
     con.commit()
     con.close()
@@ -270,54 +241,33 @@ def list_logged_students(date_week: str | None = None) -> pd.DataFrame:
     return df
 
 
-def load_class_scores(date_week: str | None, activity_idx: int | None = None) -> pd.DataFrame:
-    """
-    Load class scores.
-    - If date_week and activity_idx are given => that activity of that date
-    - If only date_week is given => all activities for that date
-    - If both None => all scores
-    """
+def load_class_scores(date_week: str | None) -> pd.DataFrame:
     con = get_con()
-    if date_week and activity_idx is not None:
+    if date_week:
         df = pd.read_sql_query(
-            "SELECT student_id, date_week, activity_idx, score, note "
-            "FROM class_scores WHERE date_week=? AND activity_idx=?",
-            con,
-            params=[date_week, activity_idx],
-        )
-    elif date_week:
-        df = pd.read_sql_query(
-            "SELECT student_id, date_week, activity_idx, score, note "
-            "FROM class_scores WHERE date_week=?",
+            "SELECT student_id, date_week, score, note FROM class_scores WHERE date_week=?",
             con,
             params=[date_week],
         )
     else:
         df = pd.read_sql_query(
-            "SELECT student_id, date_week, activity_idx, score, note FROM class_scores",
+            "SELECT student_id, date_week, score, note FROM class_scores",
             con,
         )
     con.close()
     return df
 
 
-def save_class_scores(date_week: str, activity_idx: int, score_rows) -> None:
+def save_class_scores(date_week: str, score_rows) -> None:
     """
     score_rows: iterable of (student_id, score, note)
-    Save scores for specific date_week and activity_idx (กิจกรรมที่เท่าไหร่ในวันนั้น)
     """
     con = get_con()
     cur = con.cursor()
     for student_id, score, note in score_rows:
         cur.execute(
-            """
-            INSERT INTO class_scores (student_id, date_week, activity_idx, score, note)
-            VALUES (?,?,?,?,?)
-            ON CONFLICT(student_id, date_week, activity_idx) DO UPDATE SET
-                score=excluded.score,
-                note=excluded.note
-            """,
-            (student_id, date_week, int(activity_idx), score, note),
+            "INSERT INTO class_scores (student_id, date_week, score, note) VALUES (?,?,?,?)",
+            (student_id, date_week, score, note),
         )
     con.commit()
     con.close()
@@ -735,34 +685,13 @@ with tab_teacher:
                     counts_df, how="left", on=["student_id", "date_week"]
                 )
 
-                # เลือกกิจกรรมที่เท่าไหร่ของวันนั้นที่จะดู/แก้
-                selected_activity_idx = st.number_input(
-                    "Activity Number for this date (1 = กิจกรรมที่ 1 ของวันนี้)",
-                    min_value=1,
-                    max_value=10,
-                    value=1,
-                    step=1,
-                    key=f"activity_idx_for_{effective_filter or 'all'}",
-                )
-
-                class_scores_df = None
-                if effective_filter:
-                    class_scores_df = load_class_scores(
-                        effective_filter, int(selected_activity_idx)
-                    )
-                else:
-                    # ถ้าดูทุกวัน ก็ไม่ merge activity score เพื่อไม่ให้ซับซ้อนเกินไป
-                    class_scores_df = pd.DataFrame()
-
-                if class_scores_df is not None and not class_scores_df.empty:
+                class_scores_df = load_class_scores(None)
+                if not class_scores_df.empty:
                     class_scores_df = class_scores_df.rename(
                         columns={"score": "Activity Score"}
                     )
-                    class_scores_df = class_scores_df[
-                        ["student_id", "date_week", "Activity Score"]
-                    ]
                     display_df = display_df.merge(
-                        class_scores_df,
+                        class_scores_df[["student_id", "date_week", "Activity Score"]],
                         how="left",
                         on=["student_id", "date_week"],
                     )
@@ -778,9 +707,7 @@ with tab_teacher:
 
                 # --- Editable Activity Score only when a single date is selected ---
                 if effective_filter:
-                    st.markdown(
-                        f"**Check Answers & Edit Activity Score (Date: {effective_filter}, Activity {int(selected_activity_idx)})**"
-                    )
+                    st.markdown("**Check Answers & Edit Activity Score (this date only)**")
                     edited_df = st.data_editor(
                         display_df,
                         hide_index=True,
@@ -804,14 +731,14 @@ with tab_teacher:
                             "group_name",
                             "Answer Count",
                         ],
-                        key=f"activity_editor_{effective_filter}_{int(selected_activity_idx)}",
+                        key=f"activity_editor_{effective_filter}",
                     )
 
                     if st.button(
-                        "💾 Save Activity Scores for this date & activity",
+                        "💾 Save Activity Scores for this date",
                         use_container_width=True,
                     ):
-                        # average Activity Score per student for this date & activity
+                        # average Activity Score per student for this date
                         grouped = (
                             edited_df.groupby("student_id")["Activity Score"]
                             .mean()
@@ -821,12 +748,8 @@ with tab_teacher:
                             (row["student_id"], float(row["Activity Score"]), "")
                             for _, row in grouped.iterrows()
                         ]
-                        save_class_scores(
-                            effective_filter, int(selected_activity_idx), rows_to_save
-                        )
-                        st.success(
-                            f"บันทึก Activity Score สำหรับวันที่ {effective_filter} กิจกรรมที่ {int(selected_activity_idx)} เรียบร้อยแล้ว ✅"
-                        )
+                        save_class_scores(effective_filter, rows_to_save)
+                        st.success("บันทึก Activity Score สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
 
                     # use edited_df for export
                     st.session_state["answers_export_df"] = edited_df
@@ -968,12 +891,34 @@ with tab_teacher_total:
     else:
         st.caption("ตารางภาพรวมคะแนนจาก Activity Score ในแต่ละวันที่มีการให้คะแนน (แยกแต่ละกิจกรรม)")
 
-        df_cls = load_class_scores(None, None)
+        con = get_con()
+        df_cls = pd.read_sql_query(
+            "SELECT student_id, date_week, score FROM class_scores",
+            con,
+        )
+        con.close()
 
         if df_cls.empty:
             st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมในระบบ")
         else:
+            # ใส่ลำดับกิจกรรมในแต่ละวันต่อคน: activity_idx = 1,2,3,...
             df_cls = df_cls.copy()
+            df_cls["activity_idx"] = (
+                df_cls.sort_values(["student_id", "date_week"])
+                .groupby(["student_id", "date_week"])
+                .cumcount()
+                + 1
+            )
+
+            # จำนวนกิจกรรมสูงสุดต่อวัน (ใช้สำหรับสร้างจำนวนคอลัมน์)
+            max_act_by_date = (
+                df_cls.groupby("date_week")["activity_idx"].max().to_dict()
+            )
+
+            # วันที่ทั้งหมด (จัดเรียง)
+            dates = sorted(df_cls["date_week"].dropna().unique().tolist())
+            # รายชื่อนักเรียนทั้งหมด
+            students = sorted(df_cls["student_id"].dropna().unique().tolist())
 
             # ฟังก์ชันช่วยแปลงรูปแบบวันที่เป็น dd-mm-YYYY
             def format_date_label(d: str) -> str:
@@ -982,15 +927,7 @@ with tab_teacher_total:
                 except Exception:
                     return d
 
-            # หาค่า max activity_idx ต่อวัน
-            max_act_by_date = (
-                df_cls.groupby("date_week")["activity_idx"].max().to_dict()
-            )
-
-            dates = sorted(df_cls["date_week"].dropna().unique().tolist())
-            students = sorted(df_cls["student_id"].dropna().unique().tolist())
-
-            # เตรียมชื่อคอลัมน์กิจกรรมทั้งหมดตามวันที่และจำนวนกิจกรรมสูงสุดในวันนั้น
+            # เตรียมลิสต์ชื่อคอลัมน์กิจกรรมทั้งหมดตามวันที่และจำนวนกิจกรรมสูงสุดในวันนั้น
             activity_columns = []
             for d in dates:
                 label_date = format_date_label(d)
@@ -1005,6 +942,7 @@ with tab_teacher_total:
                 sid_df = df_cls[df_cls["student_id"] == sid]
 
                 total_score = 0.0
+                # เติมค่าคะแนนในแต่ละคอลัมน์ (ถ้าไม่มีให้เป็น 0)
                 for d in dates:
                     label_date = format_date_label(d)
                     max_act = int(max_act_by_date.get(d, 0))
