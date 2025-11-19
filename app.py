@@ -494,10 +494,9 @@ with tab_student:
         )
         st.session_state.group_name = group_value.strip()
 
-        # Validation for current step
-        current_q_filled = questions[q_idx].strip() != ""
+        # Validation for current step: ONLY require answer for Next
         current_a_filled = st.session_state.answers[q_idx].strip() != ""
-        allow_next = current_q_filled and current_a_filled
+        allow_next = current_a_filled
 
         # Controls row (Back / Next)
         c1, c2 = st.columns([1, 1])
@@ -525,10 +524,8 @@ with tab_student:
             st.session_state.show_preview = False
             st.rerun()
 
-        # Check if all questions and answers are filled (for existing questions)
+        # Check if all ANSWERS are filled (question text may be blank, that's ok)
         all_filled = all(
-            q.strip() != "" for q in st.session_state.current_questions
-        ) and all(
             a.strip() != ""
             for a in st.session_state.answers[: len(st.session_state.current_questions)]
         )
@@ -537,7 +534,7 @@ with tab_student:
         if st.button("👁️ Preview", use_container_width=True, disabled=not all_filled):
             st.session_state.show_preview = True
         if not all_filled:
-            st.info("กรุณากรอก 'คำถาม' และ 'คำตอบ' ให้ครบทุกข้อก่อนกด Preview/Submit")
+            st.info("กรุณากรอก 'คำตอบ' ให้ครบทุกข้อก่อนกด Preview/Submit")
 
         if st.session_state.get("show_preview"):
             st.subheader("Preview & Submit")
@@ -561,7 +558,7 @@ with tab_student:
                     qa = [
                         (
                             i + 1,
-                            questions[i].strip(),
+                            (questions[i] or "").strip(),
                             st.session_state.answers[i].strip(),
                         )
                         for i in range(total)
@@ -1161,3 +1158,4 @@ with tab_teacher_total:
                 use_container_width=True,
                 key="export_total_scores_csv",
             )
+
