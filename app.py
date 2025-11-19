@@ -459,7 +459,6 @@ with tab_student:
         questions = st.session_state.get("current_questions", DEFAULT_QUESTIONS).copy()
         total = len(questions)
 
-        # Ensure at least 1
         if total <= 0:
             questions = [""]
             total = 1
@@ -471,7 +470,6 @@ with tab_student:
         progress_value = max(0.0, min((q_idx + 1) / total, 1.0))
         st.progress(progress_value, text=f"ข้อ {q_idx + 1}")
 
-        # Editable question text (per submission)
         key_q = f"q_{q_idx}"
         edited_q = st.text_input(
             "Question",
@@ -482,7 +480,6 @@ with tab_student:
         questions[q_idx] = edited_q
         st.session_state.current_questions = questions
 
-        # Answer box
         if len(st.session_state.answers) != total:
             st.session_state.answers = (st.session_state.answers + [""] * total)[:total]
         key_a = f"a_{q_idx}"
@@ -497,11 +494,9 @@ with tab_student:
         )
         st.session_state.group_name = group_value.strip()
 
-        # Validation for current step: ONLY require answer for Next
         current_a_filled = st.session_state.answers[q_idx].strip() != ""
         allow_next = current_a_filled
 
-        # Controls row (Back / Next)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("⬅️ Back", use_container_width=True, disabled=(q_idx == 0)):
@@ -518,7 +513,6 @@ with tab_student:
                 st.session_state.show_preview = False
                 st.rerun()
 
-        # Button to add a brand-new question at the end
         if st.button("➕ Add Question", use_container_width=True):
             st.session_state.current_questions.append("")
             st.session_state.answers.append("")
@@ -526,7 +520,6 @@ with tab_student:
             st.session_state.show_preview = False
             st.rerun()
 
-        # Check if all ANSWERS are filled (question text may be blank, that's ok)
         all_filled = all(
             a.strip() != ""
             for a in st.session_state.answers[: len(st.session_state.current_questions)]
@@ -712,8 +705,62 @@ with tab_teacher:
                     display_df["Activity Score"].fillna(0.0).round(2)
                 )
 
-                st.dataframe(display_df, hide_index=True, use_container_width=True)
-                st.session_state["answers_export_df"] = display_df
+                # --- Editable Activity Score only when a single date is selected ---
+                if effective_filter:
+                    st.markdown("**Check Answers & Edit Activity Score (this date only)**")
+                    edited_df = st.data_editor(
+                        display_df,
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        column_config={
+                            "Activity Score": st.column_config.NumberColumn(
+                                "Activity Score",
+                                help="คะแนนกิจกรรม สามารถใส่ทศนิยมได้ เช่น 0.50, 1.25",
+                                step=0.01,
+                                format="%.2f",
+                            )
+                        },
+                        disabled=[
+                            "id",
+                            "student_id",
+                            "date_week",
+                            "question_no",
+                            "question",
+                            "answer",
+                            "group_name",
+                            "Answer Count",
+                        ],
+                        key=f"activity_editor_{effective_filter}",
+                    )
+
+                    if st.button(
+                        "💾 Save Activity Scores for this date",
+                        use_container_width=True,
+                    ):
+                        # average Activity Score per student for this date
+                        grouped = (
+                            edited_df.groupby("student_id")["Activity Score"]
+                            .mean()
+                            .reset_index()
+                        )
+                        rows_to_save = [
+                            (row["student_id"], float(row["Activity Score"]), "")
+                            for _, row in grouped.iterrows()
+                        ]
+                        save_class_scores(effective_filter, rows_to_save)
+                        st.success("บันทึก Activity Score สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
+
+                    # use edited_df for export
+                    st.session_state["answers_export_df"] = edited_df
+                else:
+                    # all dates → read-only
+                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    st.caption(
+                        "หากต้องการแก้ไข Activity Score ให้เลือกวันที่เฉพาะด้านบน (ไม่เลือก 'ดูทุกวัน')."
+                    )
+                    st.session_state["answers_export_df"] = display_df
+
                 st.session_state["answers_export_label"] = effective_filter or "all"
 
         st.caption(
