@@ -1,8 +1,8 @@
-
 # app.py — Streamlit Prototype: DADS9 - 5002 Score
 # - Student can append unlimited questions before preview/submit
 # - Safe Back/Next, progress clamped
 # - Optional edit of question text per submission
+
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -739,10 +739,10 @@ with tab_teacher:
                         "💾 Save Activity Scores for this date",
                         use_container_width=True,
                     ):
-                        # average Activity Score per student for this date
+                        # SUM Activity Score per student for this date
                         grouped = (
                             edited_df.groupby("student_id")["Activity Score"]
-                            .mean()
+                            .sum()
                             .reset_index()
                         )
                         rows_to_save = [
@@ -890,11 +890,11 @@ with tab_teacher_total:
     if access_code_total.strip() != "1234":
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนภาพรวมของนักเรียน")
     else:
-        st.caption("ตารางภาพรวมคะแนนจาก Activity Score ในแต่ละวันที่มีการให้คะแนน (แยกแต่ละกิจกรรม)")
+        st.caption("ตารางภาพรวมคะแนนจาก Activity Score รวมทุกกิจกรรมของนักเรียน (ทุกวัน)")
 
         con = get_con()
         df_cls = pd.read_sql_query(
-            "SELECT student_id, date_week, score FROM class_scores",
+            "SELECT student_id, score FROM class_scores",
             con,
         )
         con.close()
@@ -902,85 +902,23 @@ with tab_teacher_total:
         if df_cls.empty:
             st.info("ยังไม่มีข้อมูลคะแนนกิจกรรมในระบบ")
         else:
-            # ใส่ลำดับกิจกรรมในแต่ละวันต่อคน: activity_idx = 1,2,3,...
-            df_cls = df_cls.copy()
-            df_cls["activity_idx"] = (
-                df_cls.sort_values(["student_id", "date_week"])
-                .groupby(["student_id", "date_week"])
-                .cumcount()
-                + 1
+            # รวมคะแนนทั้งหมดของแต่ละคน (sum)
+            overview_df = (
+                df_cls.groupby("student_id", as_index=False)["score"]
+                .sum()
+                .rename(columns={"student_id": "Student ID", "score": "Total Score"})
             )
+            overview_df["Total Score"] = overview_df["Total Score"].fillna(0.0).round(2)
 
-            # จำนวนกิจกรรมสูงสุดต่อวัน (ใช้สำหรับสร้างจำนวนคอลัมน์)
-            max_act_by_date = (
-                df_cls.groupby("date_week")["activity_idx"].max().to_dict()
-            )
-
-            # วันที่ทั้งหมด (จัดเรียง)
-            dates = sorted(df_cls["date_week"].dropna().unique().tolist())
-            # รายชื่อนักเรียนทั้งหมด
-            students = sorted(df_cls["student_id"].dropna().unique().tolist())
-
-            # ฟังก์ชันช่วยแปลงรูปแบบวันที่เป็น dd-mm-YYYY
-            def format_date_label(d: str) -> str:
-                try:
-                    return pd.to_datetime(d).strftime("%d-%m-%Y")
-                except Exception:
-                    return d
-
-            # เตรียมลิสต์ชื่อคอลัมน์กิจกรรมทั้งหมดตามวันที่และจำนวนกิจกรรมสูงสุดในวันนั้น
-            activity_columns = []
-            for d in dates:
-                label_date = format_date_label(d)
-                max_act = int(max_act_by_date.get(d, 0))
-                for act_idx in range(1, max_act + 1):
-                    col_name = f"{label_date}activity{act_idx}"
-                    activity_columns.append(col_name)
-
-            rows = []
-            for sid in students:
-                row = {"Student ID": sid}
-                sid_df = df_cls[df_cls["student_id"] == sid]
-
-                total_score = 0.0
-                # เติมค่าคะแนนในแต่ละคอลัมน์ (ถ้าไม่มีให้เป็น 0)
-                for d in dates:
-                    label_date = format_date_label(d)
-                    max_act = int(max_act_by_date.get(d, 0))
-                    for act_idx in range(1, max_act + 1):
-                        col_name = f"{label_date}activity{act_idx}"
-                        match = sid_df[
-                            (sid_df["date_week"] == d)
-                            & (sid_df["activity_idx"] == act_idx)
-                        ]
-                        if not match.empty:
-                            val = float(match["score"].iloc[0] or 0.0)
-                        else:
-                            val = 0.0
-                        row[col_name] = round(val, 2)
-                        total_score += val
-
-                row["Total Score"] = round(total_score, 2)
-                rows.append(row)
-
-            overview_df = pd.DataFrame(rows)
-
-            # จัดลำดับคอลัมน์: Student ID, ตามด้วยคอลัมน์กิจกรรมทั้งหมด, แล้วปิดท้ายด้วย Total Score
-            final_cols = ["Student ID"] + activity_columns + ["Total Score"]
-            overview_df = overview_df.reindex(columns=final_cols)
-
-            # 👇 Only display Student ID + Total Score
-            display_overview_df = overview_df[["Student ID", "Total Score"]]
-
-            st.markdown("### overview of score")
+            st.markdown("### Overview of Score (Total per Student)")
             st.dataframe(
-                display_overview_df,
+                overview_df,
                 hide_index=True,
                 use_container_width=True,
             )
 
-            # Export CSV of this overview (only 2 columns)
-            csv_overview = display_overview_df.to_csv(index=False).encode("utf-8")
+            # Export CSV of this overview
+            csv_overview = overview_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Export Score Overview CSV",
                 csv_overview,
