@@ -90,7 +90,7 @@ def init_db():
     if "group_name" not in existing_cols:
         cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
 
-    # global weighting scheme (single row, id = 1)
+    # global weighting scheme table kept (not used in overview now, but harmless)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS score_weights (
@@ -344,7 +344,7 @@ def load_student_groups(date_week: str | None) -> dict[str, str]:
 def load_score_weights() -> tuple[float, float, float]:
     """
     Load global weighting scheme (w_answers, w_class, w_part).
-    If none is saved yet, return (1.0, 1.0, 1.0).
+    Currently not used in the Score Overview UI, but kept for compatibility.
     """
     con = get_con()
     df = pd.read_sql_query(
@@ -363,7 +363,7 @@ def load_score_weights() -> tuple[float, float, float]:
 
 def save_score_weights(w_answers: float, w_class: float, w_part: float) -> None:
     """
-    Save global weighting scheme so it is reused in future sessions.
+    Save global weighting scheme (not currently used in the Score Overview UI).
     """
     con = get_con()
     cur = con.cursor()
@@ -400,13 +400,13 @@ st.session_state.setdefault("answers_export_label", "all")
 
 st.title("📚 DADS9 - 5002 Score")
 
-# 4 pages: Student, Teacher, Teacher (Participation), Teacher (Total Score – All Time)
+# 4 pages: Student, Teacher, Teacher (Participation), Teacher (Score Overview)
 tab_student, tab_teacher, tab_teacher_part, tab_teacher_total = st.tabs(
     [
         "👩‍🎓 Student",
         "👨‍🏫 Teacher",
         "👨‍🏫 Teacher (Student Participation)",
-        "👨‍🏫 Teacher (Total Score – All Time)",
+        "👨‍🏫 Teacher (Score Overview)",
     ]
 )
 
@@ -459,6 +459,7 @@ with tab_student:
         questions = st.session_state.get("current_questions", DEFAULT_QUESTIONS).copy()
         total = len(questions)
 
+        # Ensure at least 1
         if total <= 0:
             questions = [""]
             total = 1
@@ -470,6 +471,7 @@ with tab_student:
         progress_value = max(0.0, min((q_idx + 1) / total, 1.0))
         st.progress(progress_value, text=f"ข้อ {q_idx + 1}")
 
+        # Editable question text (per submission)
         key_q = f"q_{q_idx}"
         edited_q = st.text_input(
             "Question",
@@ -480,6 +482,7 @@ with tab_student:
         questions[q_idx] = edited_q
         st.session_state.current_questions = questions
 
+        # Answer box
         if len(st.session_state.answers) != total:
             st.session_state.answers = (st.session_state.answers + [""] * total)[:total]
         key_a = f"a_{q_idx}"
@@ -494,9 +497,11 @@ with tab_student:
         )
         st.session_state.group_name = group_value.strip()
 
+        # Validation for current step: ONLY require answer for Next
         current_a_filled = st.session_state.answers[q_idx].strip() != ""
         allow_next = current_a_filled
 
+        # Controls row (Back / Next)
         c1, c2 = st.columns([1, 1])
         with c1:
             if st.button("⬅️ Back", use_container_width=True, disabled=(q_idx == 0)):
@@ -509,10 +514,12 @@ with tab_student:
                 disabled=(q_idx >= total - 1) or (not allow_next),
                 key=f"next_btn_{q_idx}",
             ):
+                # Move to next existing question; do NOT auto-add a new blank question
                 st.session_state.q_index = min(total - 1, q_idx + 1)
                 st.session_state.show_preview = False
                 st.rerun()
 
+        # Button to add a brand-new question at the end
         if st.button("➕ Add Question", use_container_width=True):
             st.session_state.current_questions.append("")
             st.session_state.answers.append("")
@@ -520,11 +527,13 @@ with tab_student:
             st.session_state.show_preview = False
             st.rerun()
 
+        # Check if all ANSWERS are filled (question text may be blank, that's ok)
         all_filled = all(
             a.strip() != ""
             for a in st.session_state.answers[: len(st.session_state.current_questions)]
         )
 
+        # Preview & submit buttons
         if st.button("👁️ Preview", use_container_width=True, disabled=not all_filled):
             st.session_state.show_preview = True
         if not all_filled:
@@ -563,6 +572,7 @@ with tab_student:
                         st.session_state.get("group_name", ""),
                     )
                     st.success("Your answers have been submitted successfully!")
+                    # reset for new submission
                     st.session_state.started = False
                     st.session_state.q_index = 0
                     st.session_state.answers = [""] * len(DEFAULT_QUESTIONS)
@@ -666,6 +676,8 @@ with tab_teacher:
         if start_check:
             st.session_state.teacher_loaded = True
 
+        edited_df = None
+
         if st.session_state.get("teacher_loaded"):
             df = load_answers(effective_filter or None)
             if df.empty:
@@ -685,6 +697,7 @@ with tab_teacher:
                     counts_df, how="left", on=["student_id", "date_week"]
                 )
 
+                # Load activity scores (from class_scores) and merge
                 class_scores_df = load_class_scores(None)
                 if not class_scores_df.empty:
                     class_scores_df = class_scores_df.rename(
@@ -705,63 +718,67 @@ with tab_teacher:
                     display_df["Activity Score"].fillna(0.0).round(2)
                 )
 
-                # --- Editable Activity Score only when a single date is selected ---
-                if effective_filter:
-                    st.markdown("**Check Answers & Edit Activity Score (this date only)**")
-                    edited_df = st.data_editor(
-                        display_df,
-                        hide_index=True,
-                        use_container_width=True,
-                        num_rows="fixed",
-                        column_config={
-                            "Activity Score": st.column_config.NumberColumn(
-                                "Activity Score",
-                                help="คะแนนกิจกรรม สามารถใส่ทศนิยมได้ เช่น 0.50, 1.25",
-                                step=0.01,
-                                format="%.2f",
-                            )
-                        },
-                        disabled=[
-                            "id",
-                            "student_id",
-                            "date_week",
-                            "question_no",
-                            "question",
-                            "answer",
-                            "group_name",
-                            "Answer Count",
-                        ],
-                        key=f"activity_editor_{effective_filter}",
-                    )
+                # Editable Activity Score directly in the table (for this view)
+                st.markdown("**Answers & Activity Score (edit Activity Score in-place)**")
 
+                edited_df = st.data_editor(
+                    display_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Activity Score": st.column_config.NumberColumn(
+                            "Activity Score",
+                            help="Edit per-student Activity Score here",
+                            step=0.01,
+                            format="%.2f",
+                        )
+                    },
+                    disabled=[
+                        "id",
+                        "student_id",
+                        "date_week",
+                        "question_no",
+                        "question",
+                        "answer",
+                        "group_name",
+                        "Answer Count",
+                    ],
+                    key="teacher_answers_editor",
+                )
+
+                st.session_state["answers_export_df"] = edited_df
+                st.session_state["answers_export_label"] = effective_filter or "all"
+
+                # Save Activity Score (only when filtered by a single date)
+                if effective_filter:
                     if st.button(
-                        "💾 Save Activity Scores for this date",
+                        "💾 Save Activity Score for this Date/Week",
                         use_container_width=True,
                     ):
-                        # average Activity Score per student for this date
-                        grouped = (
-                            edited_df.groupby("student_id")["Activity Score"]
-                            .mean()
-                            .reset_index()
-                        )
-                        rows_to_save = [
-                            (row["student_id"], float(row["Activity Score"]), "")
-                            for _, row in grouped.iterrows()
-                        ]
-                        save_class_scores(effective_filter, rows_to_save)
-                        st.success("บันทึก Activity Score สำหรับวันที่นี้เรียบร้อยแล้ว ✅")
-
-                    # use edited_df for export
-                    st.session_state["answers_export_df"] = edited_df
+                        # Aggregate per student for the selected date
+                        df_to_save = edited_df[
+                            edited_df["date_week"] == effective_filter
+                        ].copy()
+                        if df_to_save.empty:
+                            st.warning("No rows for this Date/Week to save.")
+                        else:
+                            per_student = (
+                                df_to_save.groupby("student_id")["Activity Score"]
+                                .mean()
+                                .reset_index()
+                            )
+                            rows_to_save = [
+                                (row["student_id"], float(row["Activity Score"]), "")
+                                for _, row in per_student.iterrows()
+                            ]
+                            save_class_scores(effective_filter, rows_to_save)
+                            st.success(
+                                f"Saved Activity Score for {len(rows_to_save)} students on {effective_filter} ✅"
+                            )
                 else:
-                    # all dates → read-only
-                    st.dataframe(display_df, hide_index=True, use_container_width=True)
                     st.caption(
-                        "หากต้องการแก้ไข Activity Score ให้เลือกวันที่เฉพาะด้านบน (ไม่เลือก 'ดูทุกวัน')."
+                        "Tip: To edit and save Activity Score, please filter by a specific Date/Week (not 'ดูทุกวัน')."
                     )
-                    st.session_state["answers_export_df"] = display_df
-
-                st.session_state["answers_export_label"] = effective_filter or "all"
 
         st.caption(
             "Tip: Students can append extra questions before submitting. Default question set is provided by the teacher per Date/Week."
@@ -876,9 +893,9 @@ with tab_teacher_part:
                     st.success("บันทึกจำนวนครั้งที่มีส่วนร่วมของนักเรียนเรียบร้อยแล้ว")
 
 
-# ---------------- Teacher (Total Score – All Time) ----------------
+# ---------------- Teacher (Score Overview) ----------------
 with tab_teacher_total:
-    st.subheader("Total Score – All Time (Answers + Activity Score + Participation)")
+    st.subheader("overview of score")
     access_code_total = st.text_input(
         "Teacher Access Code",
         type="password",
@@ -890,181 +907,56 @@ with tab_teacher_total:
         st.info("กรุณากรอกรหัสผ่าน เพื่อดูคะแนนรวมของนักเรียน")
     else:
         st.caption(
-            "คะแนนรวมสะสมจากทุกวันที่มีข้อมูล: "
-            "จำนวนคำตอบ (Answers) + Activity Score + การมีส่วนร่วม (Participation)."
+            "แสดงคะแนน Activity Score ของนักเรียนในแต่ละกิจกรรม (ตามวันที่ / สัปดาห์) และคะแนนรวมทั้งหมด."
         )
 
         con = get_con()
-
-        df_ans = pd.read_sql_query(
-            "SELECT student_id, COUNT(*) AS Answers FROM answers GROUP BY student_id",
-            con,
-        )
-
         df_cls = pd.read_sql_query(
-            "SELECT student_id, SUM(score) AS ActivityScore FROM class_scores GROUP BY student_id",
+            "SELECT student_id, date_week, score FROM class_scores ORDER BY date_week",
             con,
         )
-
-        df_part = pd.read_sql_query(
-            "SELECT student_id, SUM(participation) AS Participation "
-            "FROM participation GROUP BY student_id",
-            con,
-        )
-
-        df_group = pd.read_sql_query(
-            """
-            SELECT student_id, MAX(COALESCE(group_name, '')) AS group_name
-            FROM answers
-            GROUP BY student_id
-            """,
-            con,
-        )
-
         con.close()
 
-        answer_counts_all = (
-            dict(zip(df_ans["student_id"], df_ans["Answers"]))
-            if not df_ans.empty
-            else {}
-        )
-        activity_scores_all = (
-            dict(zip(df_cls["student_id"], df_cls["ActivityScore"]))
-            if not df_cls.empty
-            else {}
-        )
-        participation_all = (
-            dict(zip(df_part["student_id"], df_part["Participation"]))
-            if not df_part.empty
-            else {}
-        )
-        group_map_all = (
-            dict(zip(df_group["student_id"], df_group["group_name"]))
-            if not df_group.empty
-            else {}
-        )
-
-        all_ids = sorted(
-            set(answer_counts_all.keys())
-            | set(activity_scores_all.keys())
-            | set(participation_all.keys())
-            | set(group_map_all.keys())
-        )
-
-        if not all_ids:
-            st.info("ยังไม่มีข้อมูลคะแนนรวม (ยังไม่มีคำตอบ Activity Score หรือการมีส่วนร่วมในระบบ)")
+        if df_cls.empty:
+            st.info("ยังไม่มี Activity Score ในระบบ")
         else:
-            db_w_answers, db_w_class, db_w_part = load_score_weights()
-
-            if "w_answers_all" not in st.session_state:
-                st.session_state["w_answers_all"] = db_w_answers
-            if "w_class_all" not in st.session_state:
-                st.session_state["w_class_all"] = db_w_class
-            if "w_part_all" not in st.session_state:
-                st.session_state["w_part_all"] = db_w_part
-
-            st.markdown("### 🎚 Weighting Scheme")
-            c_w1, c_w2, c_w3 = st.columns(3)
-            with c_w1:
-                w_answers = st.number_input(
-                    "Weight: Answers",
-                    value=float(st.session_state["w_answers_all"]),
-                    step=0.1,
-                    key="w_answers_all",
-                )
-            with c_w2:
-                w_class = st.number_input(
-                    "Weight: Activity Score",
-                    value=float(st.session_state["w_class_all"]),
-                    step=0.1,
-                    key="w_class_all",
-                )
-            with c_w3:
-                w_part = st.number_input(
-                    "Weight: Participation",
-                    value=float(st.session_state["w_part_all"]),
-                    step=0.1,
-                    key="w_part_all",
-                )
-
-            st.caption(
-                f"สูตร: Final Score = Answers × {w_answers} + Activity Score × {w_class} + Participation × {w_part}"
+            # Pivot: rows = students, columns = dates, values = activity score
+            pivot_df = df_cls.pivot_table(
+                index="student_id",
+                columns="date_week",
+                values="score",
+                aggfunc="sum",
+                fill_value=0.0,
             )
 
-            if st.button("💾 Save weights as default", use_container_width=True):
-                save_score_weights(w_answers, w_class, w_part)
-                st.success("บันทึกค่าน้ำหนักเป็นค่าเริ่มต้นสำหรับครั้งถัดไปเรียบร้อยแล้ว ✅")
+            # Ensure stable column order by date
+            pivot_df = pivot_df.reindex(sorted(pivot_df.columns), axis=1)
 
-            rows = []
-            for sid in all_ids:
-                ans = answer_counts_all.get(sid, 0)
-                act = activity_scores_all.get(sid, 0.0) or 0.0
-                part = participation_all.get(sid, 0) or 0
-                group_label = (group_map_all.get(sid, "") or "").strip()
+            # Add total score across all dates
+            pivot_df["Total Score"] = pivot_df.sum(axis=1)
 
-                total_raw = ans + act + part
-                final_score = ans * w_answers + act * w_class + part * w_part
+            # Reset index to have Student ID as a column
+            pivot_df = pivot_df.reset_index().rename(
+                columns={"student_id": "Student ID"}
+            )
 
-                rows.append(
-                    {
-                        "Student ID": sid,
-                        "Group": group_label,
-                        "Answers": ans,
-                        "Activity Score": round(act, 2),
-                        "Participation": part,
-                        "Total (raw)": total_raw,
-                        "Final Score": round(final_score, 2),
-                    }
-                )
+            # Round to 2 decimals for display
+            score_cols = [c for c in pivot_df.columns if c not in ["Student ID"]]
+            pivot_df[score_cols] = pivot_df[score_cols].astype(float).round(2)
 
-            total_df = pd.DataFrame(rows)
-
-            st.markdown("### 📊 คะแนนรวมสะสมตามนักเรียน (ทุกครั้งที่ให้คะแนน)")
             st.dataframe(
-                total_df,
+                pivot_df,
                 hide_index=True,
                 use_container_width=True,
             )
 
-            if not total_df.empty:
-                group_df = (
-                    total_df.assign(
-                        Group=total_df["Group"].apply(
-                            lambda g: g if g else "ไม่ระบุกลุ่ม"
-                        )
-                    )
-                    .groupby("Group", as_index=False)
-                    .agg(
-                        Members=("Student ID", "count"),
-                        Answers=("Answers", "sum"),
-                        ActivityScore=("Activity Score", "sum"),
-                        Participation=("Participation", "sum"),
-                        TotalRaw=("Total (raw)", "sum"),
-                        FinalScore=("Final Score", "sum"),
-                    )
-                )
-                group_df.rename(
-                    columns={
-                        "ActivityScore": "Activity Score",
-                        "TotalRaw": "Total (raw)",
-                        "FinalScore": "Final Score",
-                    },
-                    inplace=True,
-                )
-
-                st.markdown("### 👥 สรุปคะแนนรวมสะสมตามกลุ่ม")
-                st.dataframe(
-                    group_df,
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-            csv_total = total_df.to_csv(index=False).encode("utf-8")
+            # Export CSV
+            csv_total = pivot_df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇️ Export Total Score CSV (All Dates, with Final Score)",
+                "⬇️ Export Score Overview CSV",
                 csv_total,
-                file_name="total_scores_all_dates_with_final_score.csv",
+                file_name="score_overview_activity_scores.csv",
                 mime="text/csv",
                 use_container_width=True,
-                key="export_total_scores_csv",
+                key="export_score_overview_csv",
             )
